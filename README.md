@@ -6,7 +6,9 @@
 
 ## 为什么要从零构建推理引擎？
 
-调用 HuggingFace transformers 库中的 model.generate() 时，幕后其实执行了大量的工作：提示词会在单次前向传播中完成预填充（prefill），Token 会以自回归方式逐个解码，并且系统会在静默中管理 KV 缓存以避免重复计算。然而，这种方式严格串行处理请求——这对于任何实际的服务场景来说都是一个致命缺陷。Mini-LLM-Engine 剥开了所有的抽象层。它向你展示了 generate() 实际上是如何逐个 Token 执行的，并进一步引入了连续批处理机制，使得多个请求能够在单步循环内共享 GPU 时间。
+调用 HuggingFace transformers 库中的 model.generate() 时，幕后其实执行了大量的工作：提示词会在单次前向传播中完成预填充（prefill），Token 会以自回归方式逐个解码，并且系统会在静默中管理 KV 缓存以避免重复计算。然而，这种方式严格串行处理请求。
+
+这对于任何实际的服务场景来说都是一个致命缺陷。Mini-LLM-Engine 剥开了所有的抽象层。它向你展示了 generate() 实际上是如何逐个 Token 执行的，并进一步引入了连续批处理机制，使得多个请求能够在单步循环内共享 GPU 时间。
 
 ---
 
@@ -16,13 +18,13 @@
 
 该引擎由四个同心层组成，各层职责单一。最外层负责 HTTP 传输，中间层负责编排推理，最内层负责调度和底层 token 生成。各层之间通过简洁的方法调用自上向下通信，并通过基于 asyncio.Event 的通知机制自下向上通信。
 
-API 层（api/server.py）：一个 FastAPI 应用，对外暴露 /generate 端点和 /health 健康检查接口。启动时，它会初始化引擎并启动一个后台 asyncio 循环，在有挂起请求时持续调用 engine.step()。
+1️⃣ API 层（api/server.py）：一个 FastAPI 应用，对外暴露 /generate 端点和 /health 健康检查接口。启动时，它会初始化引擎并启动一个后台 asyncio 循环，在有挂起请求时持续调用 engine.step()。
 
-引擎层（engine.py）：核心的 TinyInferEngine 类。它持有模型、分词器、调度器以及所有的请求状态。每次调用 step() 时，引擎会向调度器获取当前批次，然后遍历活跃请求——对新请求执行预填充前向传播，对正在处理的请求执行解码前向传播——并采样下一个 Token。
+2️⃣ 引擎层（engine.py）：核心的 TinyInferEngine 类。它持有模型、分词器、调度器以及所有的请求状态。每次调用 step() 时，引擎会向调度器获取当前批次，然后遍历活跃请求——对新请求执行预填充前向传播，对正在处理的请求执行解码前向传播——并采样下一个 Token。
 
-调度器层（scheduler/continuous_batch.py）：ContinuousBatchScheduler 维护两个队列——waiting（等待）和 running（运行）。在每次调用 schedule() 时，它会驱逐已完成的请求，将等待队列中的请求提升至空闲的批次槽位（上限为 max_batch_size），并返回活跃批次。
+3️⃣ 调度器层（scheduler/continuous_batch.py）：ContinuousBatchScheduler 维护两个队列——waiting（等待）和 running（运行）。在每次调用 schedule() 时，它会驱逐已完成的请求，将等待队列中的请求提升至空闲的批次槽位（上限为 max_batch_size），并返回活跃批次。
 
-核心层（core/）：包含模型加载器（对 HuggingFace AutoModelForCausalLM 的轻量封装）、Request 数据类（携带生成状态及用于异步通知的 asyncio.Event），以及 sample_next_token 函数（实现了温度缩放和 top-p 核采样）。
+4️⃣ 核心层（core/）：包含模型加载器（对 HuggingFace AutoModelForCausalLM 的轻量封装）、Request 数据类（携带生成状态及用于异步通知的 asyncio.Event），以及 sample_next_token 函数（实现了温度缩放和 top-p 核采样）。
 
 ---
 
@@ -64,18 +66,17 @@ Mini-LLM-Engine/
 ```
 ---
 ## 特点
-```
+
 | 特性 | 描述 | 实现位置 |
 |------|------|----------|
 | 连续批处理 | 多个请求在单步循环内共享 GPU 时间；已完成的请求被立即驱逐，新请求被立即提升 | scheduler/continuous_batch.py |
 | KV 缓存复用 | 每个请求在解码步骤间保留其 past_key_values，避免对注意力键值对进行冗余的重复计算 | engine.py |
-| 核采样 (Top-p) | 将采样限制在累积概率超过 top_p 的最小 Token 集合中，在多样性与连贯性之间取得平衡 | core/sampler.py |
+| 核采样（Top-p） | 将采样限制在累积概率超过 top_p 的最小 Token 集合中，在多样性与连贯性之间取得平衡 | core/sampler.py |
 | 温度缩放 | 在 softmax 之前将 logits 除以温度值；较低的值会产生更具确定性的输出，较高的值则会增加随机性 | core/sampler.py |
 | 异步事件驱动 API | 每个请求使用独立的 asyncio.Event，使得 HTTP 处理程序可以 await 完成状态而不会阻塞引擎循环 | core/request.py |
 | 健康监控 | /health 端点实时暴露等待中和运行中的请求数量 | api/server.py |
-| 对比基准测试 | 三个基准测试（朴素基线、TinyInfer、vLLM）使用完全相同的提示词，以便直接比较吞吐量和延迟 | benchmarks/ |
+| 对比基准测试 | 三个基准测试（朴素基线、Mini-LLM-Engine、vLLM）使用相同提示词，便于直接比较吞吐量和延迟 | benchmarks/ |
 
-```
 
 ---
 
@@ -85,7 +86,7 @@ Mini-LLM-Engine/
 
 ---
 
-## Quick Start
+## 快速上手
 
 ```bash
 # install dependencies
