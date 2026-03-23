@@ -1,4 +1,4 @@
-# TinyInfer
+# Mini-LLM-Engine
 
 A lightweight LLM inference engine built from scratch in Python/PyTorch. Features continuous batching, paged KV cache management. Benchmarked against vLLM on throughput and latency.
 
