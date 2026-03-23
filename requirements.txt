@@ -1,0 +1,22 @@
+# Core ML frameworks
+torch>=2.0.0
+transformers>=4.30.0
+accelerate>=0.20.0
+
+# Inference optimization
+vllm>=0.2.0
+
+# API server
+fastapi>=0.100.0
+uvicorn>=0.23.0
+pydantic>=2.0.0
+
+# Benchmarking & monitoring
+aiohttp>=3.8.0
+matplotlib>=3.7.0
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Development
+jupyter>=1.0.0
+ipykernel>=6.0.0
