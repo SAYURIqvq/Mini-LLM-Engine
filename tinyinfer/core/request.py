@@ -1,14 +1,9 @@
 import asyncio
-from enum import Enum
 from typing import List, Optional
 
 import torch
 
-
-class RequestStatus(Enum):
-    WAITING = "waiting"       # queued, waiting to be scheduled
-    RUNNING = "running"       # actively generating tokens
-    FINISHED = "finished"     # generation complete
+from .status import RequestStatus
 
 
 class Request:

@@ -42,25 +42,31 @@
 
 ```
 Mini-LLM-Engine/
-├── __init__.py                  ├── engine.py                    # 核心推理循环 (prefill + decode + sample)
-├── api/
+├── tinyinfer/
 │   ├── __init__.py
-│   └── server.py                # 带有后台引擎循环的 FastAPI 服务器
-├── core/
-│   ├── __init__.py              # 重新导出所有核心原语
-│   ├── config.py                # 模型路径解析 (环境变量或默认值)
-│   ├── model_loader.py          # HuggingFace 模型与分词器加载
-│   ├── request.py               # 请求状态机 (WAITING → RUNNING → FINISHED)
-│   └── sampler.py               # 温度缩放 + top-p 核采样
-├── scheduler/
-│   ├── __init__.py
-│   └── continuous_batch.py      # 带有等待/运行队列的连续批处理调度器
+│   ├── engine.py                # 核心推理循环 (prefill + decode + sample)
+│   ├── api/
+│   │   ├── __init__.py
+│   │   └── server.py            # 带有后台引擎循环的 FastAPI 服务器
+│   ├── core/
+│   │   ├── __init__.py
+│   │   ├── config.py            # 模型路径解析 (环境变量或默认值)
+│   │   ├── model_loader.py      # HuggingFace 模型与分词器加载
+│   │   ├── request.py           # 请求状态机 (WAITING → RUNNING → FINISHED)
+│   │   ├── status.py            # 轻量状态枚举
+│   │   └── sampler.py           # 温度缩放 + top-p 核采样
+│   └── scheduler/
+│       ├── __init__.py
+│       └── continuous_batch.py  # 带有等待/运行队列的连续批处理调度器
 ├── benchmarks/
 │   ├── bench_naive.py           # 基线：串行 model.generate()
 │   ├── bench_tinyinfer.py       # TinyInfer 引擎基准测试
 │   └── bench_vllm.py            # vLLM 参考基准测试
 ├── tests/
-│   └── test_api.py              # 顺序与并发 API 集成测试
+│   ├── test_scheduler.py        # 连续批处理调度器测试
+│   └── test_sampler.py          # 采样策略测试
+├── examples/
+│   └── api_smoke_client.py      # 顺序与并发 API 冒烟测试脚本
 └── requirements.txt             # torch, transformers, fastapi, vllm, aiohttp 等
 
 ```
@@ -69,12 +75,12 @@ Mini-LLM-Engine/
 
 | 特性 | 描述 | 实现位置 |
 |------|------|----------|
-| 连续批处理 | 多个请求在单步循环内共享 GPU 时间；已完成的请求被立即驱逐，新请求被立即提升 | scheduler/continuous_batch.py |
-| KV 缓存复用 | 每个请求在解码步骤间保留其 past_key_values，避免对注意力键值对进行冗余的重复计算 | engine.py |
-| 核采样（Top-p） | 将采样限制在累积概率超过 top_p 的最小 Token 集合中，在多样性与连贯性之间取得平衡 | core/sampler.py |
-| 温度缩放 | 在 softmax 之前将 logits 除以温度值；较低的值会产生更具确定性的输出，较高的值则会增加随机性 | core/sampler.py |
-| 异步事件驱动 API | 每个请求使用独立的 asyncio.Event，使得 HTTP 处理程序可以 await 完成状态而不会阻塞引擎循环 | core/request.py |
-| 健康监控 | /health 端点实时暴露等待中和运行中的请求数量 | api/server.py |
+| 连续批处理 | 多个请求在单步循环内共享 GPU 时间；已完成的请求被立即驱逐，新请求被立即提升 | tinyinfer/scheduler/continuous_batch.py |
+| KV 缓存复用 | 每个请求在解码步骤间保留其 past_key_values，避免对注意力键值对进行冗余的重复计算 | tinyinfer/engine.py |
+| 核采样（Top-p） | 将采样限制在累积概率超过 top_p 的最小 Token 集合中，在多样性与连贯性之间取得平衡 | tinyinfer/core/sampler.py |
+| 温度缩放 | 在 softmax 之前将 logits 除以温度值；较低的值会产生更具确定性的输出，较高的值则会增加随机性 | tinyinfer/core/sampler.py |
+| 异步事件驱动 API | 每个请求使用独立的 asyncio.Event，使得 HTTP 处理程序可以 await 完成状态而不会阻塞引擎循环 | tinyinfer/core/request.py |
+| 健康监控 | /health 端点实时暴露等待中和运行中的请求数量 | tinyinfer/api/server.py |
 | 对比基准测试 | 三个基准测试（朴素基线、Mini-LLM-Engine、vLLM）使用相同提示词，便于直接比较吞吐量和延迟 | benchmarks/ |
 
 
@@ -102,5 +108,9 @@ python benchmarks/bench_vllm.py
 uvicorn tinyinfer.api.server:app --host 0.0.0.0 --port 8000
 
 # test with concurrent requests
-python tests/test_api.py
+python examples/api_smoke_client.py
+
+# run deterministic unit tests
+pip install -r requirements-dev.txt
+python -m pytest tests -q
 ```

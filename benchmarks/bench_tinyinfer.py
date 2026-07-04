@@ -1,9 +1,8 @@
-"""
-TinyInfer benchmark - 测试自己实现的推理引擎
-手动 generate 循环 + KV cache 复用
-"""
+"""TinyInfer benchmark: manual prefill/decode loop with KV-cache reuse."""
+import asyncio
 import os
 import sys
+import time
 
 # 把项目根目录加入 path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -38,15 +37,15 @@ def main():
     print(f"\nRunning {len(PROMPTS)} prompts, max_tokens={params.max_tokens}")
     print("-" * 50)
 
-    outputs = engine.generate(PROMPTS, params)
+    total_start = time.time()
+    outputs = asyncio.run(run_batch(engine, PROMPTS, params))
+    total_time = time.time() - total_start
 
     total_tokens = 0
-    total_time = 0
     for i, out in enumerate(outputs):
-        total_tokens += len(out.token_ids)
-        total_time += out.latency
-        print(f"[{i+1}/{len(PROMPTS)}] {out.latency:.2f}s | {len(out.token_ids)} tokens | {out.prompt[:40]}...")
-        print(f"  -> {out.text[:80]}...")
+        total_tokens += out.num_generated
+        print(f"[{i+1}/{len(PROMPTS)}] {out.num_generated} tokens | {out.prompt[:40]}...")
+        print(f"  -> {out.output_text[:80]}...")
         print()
 
     print("=" * 50)
@@ -57,6 +56,17 @@ def main():
     print(f"Throughput:          {total_tokens / total_time:.2f} tokens/s")
     print(f"Avg latency/request: {total_time / len(PROMPTS):.2f}s")
     print("=" * 50)
+
+
+async def run_batch(engine: TinyInferEngine, prompts: list[str], params: SamplingParams):
+    request_ids = [engine.add_request(prompt, params) for prompt in prompts]
+    wait_tasks = [asyncio.create_task(engine.wait_for_result(rid)) for rid in request_ids]
+
+    while engine.scheduler.has_pending():
+        engine.step()
+        await asyncio.sleep(0)
+
+    return await asyncio.gather(*wait_tasks)
 
 
 if __name__ == "__main__":

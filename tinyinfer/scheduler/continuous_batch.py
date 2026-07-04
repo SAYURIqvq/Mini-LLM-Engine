@@ -1,10 +1,18 @@
+from __future__ import annotations
+
 from collections import deque
-from typing import Deque, List, Optional
-from ..core.request import Request, RequestStatus
+from typing import TYPE_CHECKING, Deque, List
+
+from ..core.status import RequestStatus
+
+if TYPE_CHECKING:
+    from ..core.request import Request
 
 
 class ContinuousBatchScheduler:
     def __init__(self, max_batch_size: int = 8):
+        if max_batch_size <= 0:
+            raise ValueError("max_batch_size must be positive")
         self.max_batch_size = max_batch_size
 
         self.waiting: Deque[Request] = deque()  # requests waiting to be scheduled
@@ -45,3 +53,11 @@ class ContinuousBatchScheduler:
     @property
     def num_running(self) -> int:
         return len(self.running)
+
+    def stats(self) -> dict[str, int]:
+        """Return scheduler queue sizes for health checks and tests."""
+        return {
+            "waiting": self.num_waiting,
+            "running": self.num_running,
+            "max_batch_size": self.max_batch_size,
+        }

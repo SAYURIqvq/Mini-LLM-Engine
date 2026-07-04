@@ -3,7 +3,7 @@ Test TinyInfer API server with concurrent requests.
 
 Usage:
   1. Start the server:  uvicorn tinyinfer.api.server:app --host 0.0.0.0 --port 8000
-  2. Run this script:   python tests/test_api.py
+  2. Run this script:   python examples/api_smoke_client.py
 """
 import asyncio
 import time

@@ -63,6 +63,9 @@ async def health():
     """Health check endpoint."""
     return {
         "status": "ok",
-        "waiting": engine.scheduler.num_waiting if engine else 0,
-        "running": engine.scheduler.num_running if engine else 0,
+        **(engine.scheduler.stats() if engine else {
+            "waiting": 0,
+            "running": 0,
+            "max_batch_size": 0,
+        }),
     }
