@@ -3,8 +3,7 @@ torch>=2.0.0
 transformers>=4.30.0
 accelerate>=0.20.0
 
-# Inference optimization
-vllm>=0.2.0
+# vLLM is optional: install requirements-benchmark.txt on a supported GPU host.
 
 # API server
 fastapi>=0.100.0

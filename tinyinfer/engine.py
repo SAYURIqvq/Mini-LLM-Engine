@@ -1,4 +1,6 @@
 import time
+import asyncio
+import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -18,7 +20,7 @@ class SamplingParams:
 
 
 class TinyInferEngine:
-    def __init__(self, model_path: str, dtype=torch.float16, max_batch_size: int = 8):
+    def __init__(self, model_path: str, dtype=torch.float16, max_batch_size: int = 8, max_input_tokens: int = 4096):
         print(f"Loading model from {model_path}...")
         t0 = time.time()
         self.model = load_model(model_path, dtype)
@@ -26,6 +28,7 @@ class TinyInferEngine:
         self.device = next(self.model.parameters()).device
         print(f"Model loaded in {time.time() - t0:.2f}s")
 
+        self.max_input_tokens = max_input_tokens
         self.scheduler = ContinuousBatchScheduler(max_batch_size)
         self._next_request_id = 0
         self._requests: Dict[int, Request] = {}  
@@ -36,7 +39,21 @@ class TinyInferEngine:
         if params is None:
             params = SamplingParams()
 
-        input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
+        if not prompt.strip():
+            raise ValueError("prompt must not be blank")
+        if not 1 <= params.max_tokens <= 4096:
+            raise ValueError("max_tokens must be between 1 and 4096")
+        if not math.isfinite(params.temperature) or not 0 <= params.temperature <= 10:
+            raise ValueError("temperature must be finite and between 0 and 10")
+        if not math.isfinite(params.top_p) or not 0 < params.top_p <= 1:
+            raise ValueError("top_p must be finite and in (0, 1]")
+        input_ids = self.tokenizer.encode(prompt, return_tensors="pt")
+        if input_ids.shape[-1] == 0 or input_ids.shape[-1] > self.max_input_tokens:
+            raise ValueError(f"prompt must contain 1–{self.max_input_tokens} tokens")
+        context_limit = getattr(self.model.config, "max_position_embeddings", None)
+        if context_limit and input_ids.shape[-1] + params.max_tokens > context_limit:
+            raise ValueError("prompt plus max_tokens exceeds the model context window")
+        input_ids = input_ids.to(self.device)
 
         request = Request(
             request_id=self._next_request_id,
@@ -53,10 +70,33 @@ class TinyInferEngine:
 
     async def wait_for_result(self, request_id: int) -> Request:
         """Async wait for a request to complete."""
-        request = self._requests[request_id]  
-        await request.event.wait()
-        self._requests.pop(request_id)
-        return self._finished.pop(request_id)
+        request = self._requests[request_id]
+        try:
+            while not request.event.is_set():
+                await asyncio.sleep(0.01)
+            return self.pop_finished(request_id)
+        finally:
+            self.discard_request(request_id)
+
+    def discard_request(self, request_id):
+        request = self._requests.pop(request_id, None)
+        self._finished.pop(request_id, None)
+        self.scheduler.waiting = type(self.scheduler.waiting)(
+            r for r in self.scheduler.waiting if r.request_id != request_id)
+        self.scheduler.running = [r for r in self.scheduler.running if r.request_id != request_id]
+        if request is not None:
+            request.past_key_values = None
+            request.input_ids = None
+
+    def pop_finished(self, request_id):
+        result = self._finished.get(request_id)
+        if result is not None:
+            self.discard_request(request_id)
+        return result
+
+    def clear(self):
+        for request_id in list(self._requests):
+            self.discard_request(request_id)
 
     def step(self):
         """

@@ -1,4 +1,4 @@
-import asyncio
+import threading
 from typing import List, Optional
 
 import torch
@@ -23,8 +23,8 @@ class Request:
         self.past_key_values = None         # KV cache for this request
         self.output_text: str = ""          # final decoded text
 
-        # async event to notify client when done
-        self.event = asyncio.Event()
+        # Thread-safe completion flag; the HTTP runtime owns asyncio futures.
+        self.event = threading.Event()
 
     @property
     def num_generated(self) -> int:
