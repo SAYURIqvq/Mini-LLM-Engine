@@ -1,116 +1,72 @@
 # Mini-LLM-Engine
 
-一个轻量级的LLM 推理引擎，完全使用 Python 和 PyTorch 从零构建。它并非对现有服务框架的简单封装，而是手动实现了驱动 vLLM 和 TGI 等生产级系统的核心技术——包括连续批处理、KV 缓存复用以及核采样（nucleus sampling）。
+用 Python 与 PyTorch 实现的教学型 LLM 推理引擎，展示逐 token 解码、请求调度、每请求 KV 缓存和一个可处理失败的 HTTP 服务。
 
----
+## 当前实现与边界
 
-## 为什么要从零构建推理引擎？
+| 能力 | 当前实现 |
+|---|---|
+| 调度 | waiting/running 队列，完成后补入新请求 |
+| 模型计算 | 一个 step 内逐请求前向；**尚未合并成一次 batched forward** |
+| KV 缓存 | 每个请求保存 `past_key_values`，结束或取消后释放 |
+| 采样 | temperature 与 top-p |
+| 服务 | 单个专用推理线程，HTTP 事件循环独立处理请求 |
+| 保护 | 有界待处理请求、输入预算、超时、取消清理、worker 故障传播 |
+| 尚未实现 | paged KV cache、INT8 量化、真正 batched decode、流式输出 |
 
-调用 HuggingFace transformers 库中的 model.generate() 时，幕后其实执行了大量的工作：提示词会在单次前向传播中完成预填充（prefill），Token 会以自回归方式逐个解码，并且系统会在静默中管理 KV 缓存以避免重复计算。然而，这种方式严格串行处理请求。
+调度层支持请求动态加入，但不等同于 vLLM 的 GPU 批处理或分页注意力。已有 benchmark 脚本用于实验，仓库尚未给出经过统一环境与重复运行验证的性能优势结论。
 
-这对于任何实际的服务场景来说都是一个致命缺陷。Mini-LLM-Engine 剥开了所有的抽象层。它向你展示了 generate() 实际上是如何逐个 Token 执行的，并进一步引入了连续批处理机制，使得多个请求能够在单步循环内共享 GPU 时间。
+## 快速开始
 
----
-
-## 架构
-
-<img width="1666" height="720" alt="image" src="https://github.com/user-attachments/assets/3e5637b5-a12d-4227-8bec-dad370e940ef" />
-
-该引擎由四个同心层组成，各层职责单一。最外层负责 HTTP 传输，中间层负责编排推理，最内层负责调度和底层 token 生成。各层之间通过简洁的方法调用自上向下通信，并通过基于 asyncio.Event 的通知机制自下向上通信。
-
-1️⃣ API 层（api/server.py）：一个 FastAPI 应用，对外暴露 /generate 端点和 /health 健康检查接口。启动时，它会初始化引擎并启动一个后台 asyncio 循环，在有挂起请求时持续调用 engine.step()。
-
-2️⃣ 引擎层（engine.py）：核心的 TinyInferEngine 类。它持有模型、分词器、调度器以及所有的请求状态。每次调用 step() 时，引擎会向调度器获取当前批次，然后遍历活跃请求——对新请求执行预填充前向传播，对正在处理的请求执行解码前向传播——并采样下一个 Token。
-
-3️⃣ 调度器层（scheduler/continuous_batch.py）：ContinuousBatchScheduler 维护两个队列——waiting（等待）和 running（运行）。在每次调用 schedule() 时，它会驱逐已完成的请求，将等待队列中的请求提升至空闲的批次槽位（上限为 max_batch_size），并返回活跃批次。
-
-4️⃣ 核心层（core/）：包含模型加载器（对 HuggingFace AutoModelForCausalLM 的轻量封装）、Request 数据类（携带生成状态及用于异步通知的 asyncio.Event），以及 sample_next_token 函数（实现了温度缩放和 top-p 核采样）。
-
----
-
-## 端到端请求流程
-
-当客户端发送 POST /generate 时，请求会在返回响应前穿越系统的每一层。这段旅程可以划分为三个不同的阶段：提交、推理和完成。下图追踪了单个请求穿过所有三个阶段的过程，并突出了每个组件发挥作用的位置。
-
-<img width="1133" height="1004" alt="image" src="https://github.com/user-attachments/assets/d910e120-cc05-4398-a5e3-13a03623e018" />
-
-这里关键的架构洞见在于异步交接：API 处理器在等待生成时不会阻塞事件循环。相反，它调用 await engine.wait_for_result(request_id)，从而挂起于 request.event.wait()。与此同时，一个独立的后台协程（engine_loop）驱动调度器执行 step()，确保 HTTP 服务器在并发负载下依然保持响应。
-
----
-
-## Project Structure
-
-```
-Mini-LLM-Engine/
-├── tinyinfer/
-│   ├── __init__.py
-│   ├── engine.py                # 核心推理循环 (prefill + decode + sample)
-│   ├── api/
-│   │   ├── __init__.py
-│   │   └── server.py            # 带有后台引擎循环的 FastAPI 服务器
-│   ├── core/
-│   │   ├── __init__.py
-│   │   ├── config.py            # 模型路径解析 (环境变量或默认值)
-│   │   ├── model_loader.py      # HuggingFace 模型与分词器加载
-│   │   ├── request.py           # 请求状态机 (WAITING → RUNNING → FINISHED)
-│   │   ├── status.py            # 轻量状态枚举
-│   │   └── sampler.py           # 温度缩放 + top-p 核采样
-│   └── scheduler/
-│       ├── __init__.py
-│       └── continuous_batch.py  # 带有等待/运行队列的连续批处理调度器
-├── benchmarks/
-│   ├── bench_naive.py           # 基线：串行 model.generate()
-│   ├── bench_tinyinfer.py       # TinyInfer 引擎基准测试
-│   └── bench_vllm.py            # vLLM 参考基准测试
-├── tests/
-│   ├── test_scheduler.py        # 连续批处理调度器测试
-│   └── test_sampler.py          # 采样策略测试
-├── examples/
-│   └── api_smoke_client.py      # 顺序与并发 API 冒烟测试脚本
-└── requirements.txt             # torch, transformers, fastapi, vllm, aiohttp 等
-
-```
----
-## 特点
-
-| 特性 | 描述 | 实现位置 |
-|------|------|----------|
-| 连续批处理 | 多个请求在单步循环内共享 GPU 时间；已完成的请求被立即驱逐，新请求被立即提升 | tinyinfer/scheduler/continuous_batch.py |
-| KV 缓存复用 | 每个请求在解码步骤间保留其 past_key_values，避免对注意力键值对进行冗余的重复计算 | tinyinfer/engine.py |
-| 核采样（Top-p） | 将采样限制在累积概率超过 top_p 的最小 Token 集合中，在多样性与连贯性之间取得平衡 | tinyinfer/core/sampler.py |
-| 温度缩放 | 在 softmax 之前将 logits 除以温度值；较低的值会产生更具确定性的输出，较高的值则会增加随机性 | tinyinfer/core/sampler.py |
-| 异步事件驱动 API | 每个请求使用独立的 asyncio.Event，使得 HTTP 处理程序可以 await 完成状态而不会阻塞引擎循环 | tinyinfer/core/request.py |
-| 健康监控 | /health 端点实时暴露等待中和运行中的请求数量 | tinyinfer/api/server.py |
-| 对比基准测试 | 三个基准测试（朴素基线、Mini-LLM-Engine、vLLM）使用相同提示词，便于直接比较吞吐量和延迟 | benchmarks/ |
-
-
----
-
-## 运行机制
-
-当客户端发送带有提示词的 POST /generate 请求时，系统会迅速依次执行以下操作：提示词被分词并封装为 Request 对象，随后被放入调度器的等待队列中。一个后台 asyncio 任务会持续调用 engine.step()。在下一步中，调度器将等待中的请求提升至运行批次，引擎随即执行一次预填充前向传播——一次性处理整个提示词。在后续步骤中，引擎执行解码前向传播，仅输入上一个生成的 Token（连同缓存中的键值对）来生成下一个 Token。每一个新生成的 Token 都会根据配置的温度和 top-p 参数进行采样。一旦生成序列结束（EOS）Token 或达到最大 Token 数限制，该请求就会被标记为 FINISHED，其内部的 asyncio.Event 被触发，挂起的 HTTP 处理程序随之唤醒，将生成的文本返回给客户端。与此同时，调度器会立即释放该批次槽位以供下一个等待中的请求使用——这正是连续批处理的精髓所在。
-
----
-
-## 快速上手
+需要 Python 3.11+ 和支持目标模型的 PyTorch 运行环境。当前模型加载默认使用 float16 与 `device_map="auto"`；CPU-only 环境建议先运行下面的离线测试。
 
 ```bash
-# install dependencies
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
+# 按 tinyinfer/core/config.py 配置 TINYINFER_MODEL_PATH
+uvicorn tinyinfer.api.server:app --host 127.0.0.1 --port 8000
+```
 
-# run naive baseline
-python benchmarks/bench_naive.py
+```bash
+curl http://127.0.0.1:8000/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Explain KV caching briefly.","max_tokens":64,"temperature":0.7,"top_p":0.9}'
+```
 
-# run vLLM benchmark
-python benchmarks/bench_vllm.py
+成功响应包含 `request_id`、`prompt`、`text` 和 `num_tokens`。模型权重、下载时间和显存要求取决于所选模型，离线测试不下载权重。
 
-# start TinyInfer API server
-uvicorn tinyinfer.api.server:app --host 0.0.0.0 --port 8000
+## 请求生命周期
 
-# test with concurrent requests
-python examples/api_smoke_client.py
+`HTTP → 有界等待队列 → 单线程模型执行 → 结果 Future → HTTP 响应`
 
-# run deterministic unit tests
+模型加载、分词、前向计算、调度和缓存回收均串行运行在同一推理线程。事件循环负责请求 Future、截止时间、客户端断开检测和健康检查，不在事件循环内执行模型前向计算。无请求时 worker 等待事件，不进行空转轮询。
+
+| 情况 | HTTP 行为 |
+|---|---|
+| 非法采样参数、空白 prompt、超长上下文 | 422 |
+| 待处理数达到上限 | 429，带 Retry-After |
+| 超时（包含排队时间） | 504 |
+| 推理 worker 失败 | 已等待及后续请求返回 503；health 返回 503 |
+| 客户端断开 | 取消等待并安排清理，不继续占用结果缓存 |
+
+默认 `TINYINFER_MAX_PENDING=64`、`TINYINFER_REQUEST_TIMEOUT=120`（秒）。请求最长 32768 字符、默认最多 4096 输入 tokens，`max_tokens` 为 1–4096；已知模型上下文长度也会检查。`temperature` 为 0–10，`top_p` 在 (0, 1] 内。
+
+取消不能抢占正在执行的 GPU/PyTorch 调用；缓存会在当前 step 返回后清理，清理前仍占用 admission 容量。关闭服务也会等待当前 step 完成。永久卡住的底层调用需要进程级监督和重启，线程 worker 不提供硬中断。发生 worker 故障后应重启服务。
+
+## 离线测试
+
+```bash
 pip install -r requirements-dev.txt
 python -m pytest tests -q
 ```
+
+使用假模型/分词器和真实 PyTorch 张量，覆盖调度、采样、缓存释放、上下文限制、worker 故障、超时、队列背压、HTTP 参数校验及推理阻塞时的 health 响应。测试不证明真实模型吞吐或 GPU 稳定性。
+
+## Benchmark 与后续工作
+
+在支持 vLLM 的 GPU 环境中安装 `requirements-benchmark.txt`，再运行 `benchmarks/` 下脚本。vLLM 不再是基础安装的强制依赖。
+
+发布比较结果前固定模型、dtype、输入/输出 token 数、并发数、预热次数和停止条件，报告吞吐、延迟分位数、显存、失败率与原始记录。逐请求执行不能作为真正 batched decode 的替代基线。
+
+下一步：实现 batched decode，验证不同输入长度及 EOS 的正确性，再评估 paged KV cache 和量化。
